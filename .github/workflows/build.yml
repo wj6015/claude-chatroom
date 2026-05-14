@@ -69,11 +69,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/package" | Out-Null
 
           Copy-Item "dist/$appName.exe" "dist/package/"
-
           Copy-Item "Chrome-bin" "dist/package/" -Recurse -Force
           Copy-Item "chromedriver.exe" "dist/package/" -Force
 
-          $readmeContent = @"
+          @'
 Web列表数据采集工具（Network版）
 ==============================
 
@@ -83,21 +82,18 @@ Web列表数据采集工具（Network版）
 - chromedriver.exe
 
 【运行说明】
-1. 将本文件夹完整保留在同一目录下
-2. 运行 Web列表数据采集工具_Network版.exe
-3. 启动浏览器后，手工登录并打开目标列表页面
-4. 先点击“清空Performance Log”
-5. 再点击查询按钮并完整展示第一页数据
-6. 最后点击“开始采集”
+1. 运行程序
+2. 启动浏览器后，手工登录并打开目标列表页面
+3. 先点击“清空Performance Log”
+4. 再点击查询按钮并完整展示第一页数据
+5. 最后点击“开始采集”
 
 【注意】
 - 该程序通过 Chrome + ChromeDriver + CDP Network 监听 queryTransPqList 响应
 - 数据以 Network.getResponseBody 为准，不直接依赖页面 loading
 - 翻页会等待页码变化和响应体可读
 - 导出文件为 xlsx
-"@
-
-          $readmeContent | Out-File -FilePath "dist/package/使用说明.txt" -Encoding UTF8
+'@ | Out-File -FilePath "dist/package/使用说明.txt" -Encoding UTF8
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
