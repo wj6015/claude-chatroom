@@ -864,8 +864,12 @@ return true;
         out_rows = self.build_rows_with_repeat_marks(rows)
         df = pd.DataFrame(out_rows, columns=EXPORT_COLUMNS)
 
-        out_path = os.path.join(BASE_DIR, f"采集结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
-        df.to_excel(out_path, index=False)
+        out_path = os.path.join(BASE_DIR, f"采集结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls")
+        df.to_excel(
+            out_path,
+            index=False,
+            engine="xlwt"
+        )
         self.log(f"导出成功：{out_path}")
         self.gui.log_queue.put(("DONE", out_path))
 
