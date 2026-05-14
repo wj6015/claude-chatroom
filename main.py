@@ -27,7 +27,86 @@ APP_TITLE = "现货交割电量采集工具_国网浏览器CDP版"
 
 BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 
-SG_BROWSER_PATH = r"C:\Users\Administrator\AppData\Local\EPRI\SGSBrowser\Application\sgsbrowser.exe"
+def find_sg_browser():
+
+    candidates = []
+
+    # 1. exe同目录配置文件优先
+    cfg = os.path.join(BASE_DIR, "sgbrowser_path.txt")
+
+    if os.path.exists(cfg):
+
+        try:
+            with open(cfg, "r", encoding="utf-8") as f:
+
+                p = f.read().strip().strip('"')
+
+                if p:
+                    candidates.append(p)
+
+        except Exception:
+            pass
+
+    # 2. 当前用户 LOCALAPPDATA
+    local = os.environ.get("LOCALAPPDATA")
+
+    if local:
+        candidates.append(
+            os.path.join(
+                local,
+                "EPRI",
+                "SGSBrowser",
+                "Application",
+                "sgsbrowser.exe"
+            )
+        )
+
+    # 3. Program Files
+    pf = os.environ.get("ProgramFiles")
+
+    if pf:
+        candidates.append(
+            os.path.join(
+                pf,
+                "EPRI",
+                "SGSBrowser",
+                "Application",
+                "sgsbrowser.exe"
+            )
+        )
+
+    # 4. Program Files x86
+    pf86 = os.environ.get("ProgramFiles(x86)")
+
+    if pf86:
+        candidates.append(
+            os.path.join(
+                pf86,
+                "EPRI",
+                "SGSBrowser",
+                "Application",
+                "sgsbrowser.exe"
+            )
+        )
+
+    # 5. 老路径兼容
+    candidates.append(
+        r"C:\Users\Administrator\AppData\Local\EPRI\SGSBrowser\Application\sgsbrowser.exe"
+    )
+
+    # 开始查找
+    for p in candidates:
+
+        if p and os.path.exists(p):
+            return p
+
+    raise FileNotFoundError(
+        "未找到国网浏览器。\n"
+        "请在程序同目录创建 sgbrowser_path.txt 并写入 sgsbrowser.exe 完整路径。"
+    )
+
+
+SG_BROWSER_PATH = find_sg_browser()
 SG_USER_DATA_DIR = os.path.join(BASE_DIR, "sgs_cdp_user_data")
 
 DEBUG_HOST = "127.0.0.1"
