@@ -1,4 +1,4 @@
-name: Build-EXE-WebList-Network
+name: Build-EXE-ChargSitu-SGSBrowser-CDP
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
           pip install pyinstaller==5.13.2
           pip install -r requirements.txt
 
-      - name: Check runtime assets
+      - name: Check main.py
         shell: pwsh
         run: |
           if (-not (Test-Path "main.py")) {
@@ -32,20 +32,10 @@ jobs:
             exit 1
           }
 
-          if (-not (Test-Path "Chrome-bin")) {
-            Write-Error "Chrome-bin folder not found"
-            exit 1
-          }
-
-          if (-not (Test-Path "chromedriver.exe")) {
-            Write-Error "chromedriver.exe not found"
-            exit 1
-          }
-
       - name: Build EXE
         shell: pwsh
         run: |
-          $appName = "Web列表数据采集工具_Network版"
+          $appName = "收费情况明细采集工具_国网浏览器CDP版"
 
           $args = @(
             '--onefile'
@@ -64,34 +54,29 @@ jobs:
       - name: Prepare package
         shell: pwsh
         run: |
-          $appName = "Web列表数据采集工具_Network版"
+          $appName = "收费情况明细采集工具_国网浏览器CDP版"
 
           New-Item -ItemType Directory -Force -Path "dist/package" | Out-Null
 
           Copy-Item "dist/$appName.exe" "dist/package/"
-          Copy-Item "Chrome-bin" "dist/package/" -Recurse -Force
-          Copy-Item "chromedriver.exe" "dist/package/" -Force
 
           $readmeLines = @(
-            "Web列表数据采集工具（Network版）"
+            "收费情况明细采集工具（国网浏览器CDP版）"
             "=============================="
             ""
             "【文件清单】"
-            "- Web列表数据采集工具_Network版.exe"
-            "- Chrome-bin\"
-            "- chromedriver.exe"
+            "- 收费情况明细采集工具_国网浏览器CDP版.exe"
             ""
             "【运行说明】"
-            "1. 运行程序"
-            "2. 启动浏览器后，手工登录并打开目标列表页面"
-            "3. 先点击“清空Performance Log”"
-            "4. 再点击查询按钮并完整展示第一页数据"
-            "5. 最后点击“开始采集”"
+            "1. 将 exe 放在目标机器的程序目录中"
+            "2. 确认目标机器已安装国网安全浏览器 SGSBrowser"
+            "3. 程序按 main.py 中配置通过 9222 CDP 端口监听 Network 响应"
+            "4. 先清空 Performance Log，再在页面手工查询并展示第一页，最后开始采集"
             ""
             "【注意】"
-            "- 该程序通过 Chrome + ChromeDriver + CDP Network 监听 queryTransPqList 响应"
-            "- 数据以 Network.getResponseBody 为准，不直接依赖页面 loading"
-            "- 翻页会等待页码变化和响应体可读"
+            "- 本版本不打包 SGSBrowser"
+            "- 本版本不依赖 Chrome-bin / chromedriver.exe"
+            "- 如目标机器安装路径不同，请同步修改 main.py 中的 SG_BROWSER_PATH"
             "- 导出文件为 xlsx"
           )
 
@@ -100,6 +85,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WebListScraper-Network-Win64
+          name: ChargSituScraper-SGSBrowser-CDP-Win64
           path: dist/package/
           retention-days: 30
