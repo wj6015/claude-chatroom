@@ -23,7 +23,7 @@ from websocket import create_connection
 
 
 # ================= 基础配置 =================
-APP_TITLE = "Web列表采集工具_国网浏览器CDP版"
+APP_TITLE = "现货交割电量采集工具_国网浏览器CDP版"
 
 BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 
