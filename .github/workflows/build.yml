@@ -35,7 +35,7 @@ jobs:
       - name: Build EXE
         shell: pwsh
         run: |
-          $appName = "收费情况明细采集工具_国网浏览器纯CDP版"
+          $appName = "现货交割电量采集工具_国网浏览器CDP版"
 
           $args = @(
             '--onefile'
@@ -62,18 +62,18 @@ jobs:
       - name: Prepare package
         shell: pwsh
         run: |
-          $appName = "收费情况明细采集工具_国网浏览器纯CDP版"
+          $appName = "现货交割电量采集工具_国网浏览器CDP版"
 
           New-Item -ItemType Directory -Force -Path "dist/package" | Out-Null
 
           Copy-Item "dist/$appName.exe" "dist/package/"
 
           $readmeLines = @(
-            "收费情况明细采集工具（国网浏览器纯CDP版）"
+            "现货交割电量采集工具_国网浏览器CDP版"
             "=============================="
             ""
             "【文件清单】"
-            "- 收费情况明细采集工具_国网浏览器纯CDP版.exe"
+            "- 现货交割电量采集工具_国网浏览器CDP版.exe"
             ""
             "【运行说明】"
             "1. 将 exe 放在目标机器的程序目录中"
