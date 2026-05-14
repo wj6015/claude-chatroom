@@ -9,8 +9,11 @@ import json
 import threading
 import logging
 import queue
+import subprocess
+import urllib.request
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from collections import Counter
 
 import pandas as pd
 import tkinter as tk
@@ -18,22 +21,29 @@ from tkinter import messagebox, scrolledtext
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 
 # ================= 基础配置 =================
+APP_TITLE = "Web列表采集工具_国网浏览器CDP版"
+
 BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 CHROMEDRIVER_PATH = os.path.join(BASE_DIR, "chromedriver.exe")
-CHROME_BINARY_PATH = os.path.join(BASE_DIR, "Chrome-bin", "chrome.exe")
+
+SG_BROWSER_PATH = r"C:\Users\Administrator\AppData\Local\EPRI\SGSBrowser\Application\sgsbrowser.exe"
+SG_USER_DATA_DIR = os.path.join(BASE_DIR, "sgs_cdp_user_data")
+
+DEBUG_HOST = "127.0.0.1"
+DEBUG_PORT = 9222
+DEBUG_VERSION_URL = f"http://{DEBUG_HOST}:{DEBUG_PORT}/json/version"
+DEBUG_TABS_URL = f"http://{DEBUG_HOST}:{DEBUG_PORT}/json"
 
 TARGET_API_KEYWORD = "queryTransPqList"
 PAGE_SIZE = 100
-NETWORK_RESPONSE_TIMEOUT = 45  # 页面展示虽快，但 preview.data 可能延迟，适当放宽
-PAGE_CHANGE_TIMEOUT = 12
+NETWORK_RESPONSE_TIMEOUT = 60  # 页面显示快，但 Preview.data 可能延迟，适度放宽
+PAGE_CHANGE_TIMEOUT = 15
+PAGE_SETTLE_DELAY = 0.5  # 页码高亮后再给接口一点时间完成刷新
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -80,7 +90,7 @@ FIELD_MAP = [
     ("ytyUp", "同比"),
 ]
 
-EXPORT_COLUMNS = [cn for _, cn in FIELD_MAP]
+EXPORT_COLUMNS = [cn for _, cn in FIELD_MAP] + ["重复标志"]
 
 
 def clean_cell(v):
@@ -116,8 +126,25 @@ def normalize_amount(v):
         return s
 
 
+def _ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def _port_ready(url: str, timeout: float = 1.2) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 # ================= 数据存储 =================
 class PageStore:
+    """
+    保存每一页原始记录，避免由于翻页重抓导致页内重复叠加。
+    页面层面覆盖写入，导出时再统一做 38 字段重复标记。
+    """
+
     def __init__(self):
         self.page_rows = {}
 
@@ -136,16 +163,13 @@ class PageStore:
             out.extend(self.page_rows[page_num])
         return out
 
-    def pages(self):
-        return sorted(self.page_rows.keys())
-
 
 # ================= 主采集器 =================
 class Collector:
     def __init__(self, gui):
         self.gui = gui
         self.driver = None
-        self.active_frame_index = None  # 绑定到目标 iframe 的索引
+        self.active_frame_index = None
         self.page_store = PageStore()
         self.total_count = 0
         self.stop_event = threading.Event()
@@ -161,7 +185,8 @@ class Collector:
     # --------- 浏览器/日志 ---------
     def clear_performance_logs(self):
         try:
-            self.driver.get_log("performance")
+            if self.driver:
+                self.driver.get_log("performance")
         except Exception:
             pass
 
@@ -169,6 +194,56 @@ class Collector:
         self.page_store.clear()
         self.total_count = 0
         self.stop_event.clear()
+
+    # --------- SGSBrowser/CDP ---------
+    def launch_sg_browser(self):
+        if not os.path.exists(SG_BROWSER_PATH):
+            raise FileNotFoundError(f"未找到国网浏览器: {SG_BROWSER_PATH}")
+
+        _ensure_dir(SG_USER_DATA_DIR)
+
+        if _port_ready(DEBUG_VERSION_URL, timeout=1.2):
+            return
+
+        args = [
+            SG_BROWSER_PATH,
+            f"--remote-debugging-port={DEBUG_PORT}",
+            f"--user-data-dir={SG_USER_DATA_DIR}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-popup-blocking",
+        ]
+
+        subprocess.Popen(
+            args,
+            cwd=os.path.dirname(SG_BROWSER_PATH),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if _port_ready(DEBUG_VERSION_URL, timeout=1.0):
+                return
+            time.sleep(0.4)
+
+        raise RuntimeError("国网浏览器 9222 端口未能在规定时间内启动")
+
+    def attach_driver(self):
+        if not os.path.exists(CHROMEDRIVER_PATH):
+            raise FileNotFoundError(f"未找到 chromedriver.exe: {CHROMEDRIVER_PATH}")
+
+        options = Options()
+        options.add_experimental_option("debuggerAddress", f"{DEBUG_HOST}:{DEBUG_PORT}")
+        options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+
+        service = Service(executable_path=CHROMEDRIVER_PATH)
+        self.driver = webdriver.Chrome(service=service, options=options)
+        self.driver.execute_cdp_cmd("Network.enable", {})
+
+    def connect_sg_browser(self):
+        self.launch_sg_browser()
+        self.attach_driver()
 
     # --------- iframe / 分页盒子 ---------
     def _pagination_box_js(self):
@@ -214,13 +289,6 @@ return candidates[candidates.length - 1].box;
         if self.active_frame_index is not None:
             self.driver.switch_to.frame(self.active_frame_index)
 
-    def _page_has_pagination(self):
-        try:
-            self._enter_bound_context()
-            return bool(self.driver.execute_script(self._pagination_box_js()))
-        except Exception:
-            return False
-
     def ensure_page_context(self, timeout=10):
         """
         优先使用已绑定 iframe；
@@ -229,6 +297,9 @@ return candidates[candidates.length - 1].box;
         deadline = time.time() + timeout
 
         while time.time() < deadline:
+            if self.stop_event.is_set():
+                return False
+
             # 1) 先尝试当前绑定上下文
             try:
                 if self.active_frame_index is not None:
@@ -309,7 +380,8 @@ return candidates[candidates.length - 1].box;
             if not box:
                 return None
             total_el = box.find_element(By.CSS_SELECTOR, ".el-pagination__total")
-            m = __import__("re").search(r"\d+", total_el.text)
+            import re
+            m = re.search(r"\d+", total_el.text)
             return int(m.group()) if m else None
         except Exception:
             return None
@@ -318,12 +390,12 @@ return candidates[candidates.length - 1].box;
     def wait_for_latest_query_payload(self, timeout=NETWORK_RESPONSE_TIMEOUT):
         """
         轮询 performance log，等待最新的 queryTransPqList 响应体可读。
+        因为页面页码先变化、表格/Preview.data 稍后才刷新，所以只以响应体可读为准。
         """
         deadline = time.time() + timeout
         latest_rid = None
 
         while time.time() < deadline and not self.stop_event.is_set():
-            # 收集最新 requestId
             try:
                 logs = self.driver.get_log("performance")
             except Exception:
@@ -487,7 +559,10 @@ return candidates[candidates.length - 1].box;
     def goto_page(self, target_page):
         """
         先尝试输入页码跳转，失败则点下一页。
-        等待页码高亮真正变化后再继续。
+        页码先变，实际展示数据/Preview.data 稍后刷新，因此这里需要：
+        1) 先等页码高亮变化
+        2) 再给一点 settle delay
+        3) 后续由 Network 响应可读来确认数据是否真正稳定
         """
         target_page = int(target_page)
         current = self.get_current_page_num()
@@ -498,6 +573,7 @@ return candidates[candidates.length - 1].box;
         # 1) 优先直接跳页
         if self.jump_to_page(target_page):
             if self.wait_for_page_num(target_page, timeout=PAGE_CHANGE_TIMEOUT):
+                time.sleep(PAGE_SETTLE_DELAY)
                 return True
 
         # 2) 失败时，若已知当前页，则补点下一页到目标页
@@ -511,9 +587,44 @@ return candidates[candidates.length - 1].box;
                 current += 1
                 if not self.wait_for_page_num(current, timeout=PAGE_CHANGE_TIMEOUT):
                     return False
+                time.sleep(PAGE_SETTLE_DELAY)
             return current == target_page
 
         return False
+
+    # --------- 重复标记 ---------
+    def record_key(self, record):
+        return tuple(normalize_text(record.get(cn, "")) for _, cn in FIELD_MAP)
+
+    def build_rows_with_repeat_marks(self, rows):
+        """
+        38字段作为唯一键：
+        - 真正去重用于判定重复组，不删除重复行
+        - 重复组按首次出现顺序编号 1,2,3...
+        - 唯一行最后一列保持空白
+        """
+        if not rows:
+            return []
+
+        counts = Counter(self.record_key(r) for r in rows)
+        key_to_group = {}
+        next_group = 1
+        out = []
+
+        for record in rows:
+            key = self.record_key(record)
+            repeat_flag = ""
+            if counts[key] > 1:
+                if key not in key_to_group:
+                    key_to_group[key] = str(next_group)
+                    next_group += 1
+                repeat_flag = key_to_group[key]
+
+            row_values = [record.get(cn, "") for _, cn in FIELD_MAP]
+            row_values.append(repeat_flag)
+            out.append(row_values)
+
+        return out
 
     # --------- 存储与导出 ---------
     def store_page(self, page_num, records):
@@ -525,7 +636,9 @@ return candidates[candidates.length - 1].box;
             self.log("没有可导出的数据。")
             return
 
-        df = pd.DataFrame(rows, columns=EXPORT_COLUMNS)
+        out_rows = self.build_rows_with_repeat_marks(rows)
+        df = pd.DataFrame(out_rows, columns=EXPORT_COLUMNS)
+
         out_path = os.path.join(BASE_DIR, f"采集结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         df.to_excel(out_path, index=False)
         self.log(f"导出成功：{out_path}")
@@ -535,10 +648,10 @@ return candidates[candidates.length - 1].box;
     def collect(self):
         """
         交互逻辑：
-        1. 用户先点击“清空日志”
+        1. 用户先点击“清空Performance Log”
         2. 用户手工点击查询，第一页完整展示
         3. 点击“开始采集”后，程序读取最新 queryTransPqList 响应
-        4. 然后逐页翻页，等待页码变化 + Network 响应体可读
+        4. 然后逐页翻页，等待页码变化 + Preview.data 可读
         """
         self.collecting = True
         self.stop_event.clear()
@@ -600,6 +713,9 @@ return candidates[candidates.length - 1].box;
                 if not self.wait_for_page_num(page_num, timeout=PAGE_CHANGE_TIMEOUT):
                     self.log(f"第 {page_num} 页页码未确认变化，继续等待网络响应。")
 
+                # 页码已变，但 preview.data 往往稍后才刷新，给一个小 settle
+                time.sleep(PAGE_SETTLE_DELAY)
+
                 self.log(f"等待第 {page_num} 页 queryTransPqList 响应体可读 ...")
                 payload = self.wait_for_latest_query_payload(timeout=NETWORK_RESPONSE_TIMEOUT)
 
@@ -637,8 +753,8 @@ return candidates[candidates.length - 1].box;
 class GUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Web列表采集工具 - Network版")
-        self.root.geometry("920x680")
+        self.root.title(APP_TITLE)
+        self.root.geometry("980x720")
         self.root.configure(bg="#1c1c1c")
 
         self.log_queue = queue.Queue()
@@ -649,7 +765,7 @@ class GUI:
         top = tk.Frame(root, bg="#1c1c1c")
         top.pack(pady=12)
 
-        self.btn_open = tk.Button(top, text="1. 启动浏览器", command=self.open_browser, width=16, bg="#333", fg="#0cf")
+        self.btn_open = tk.Button(top, text="1. 启动国网浏览器", command=self.open_browser, width=18, bg="#333", fg="#0cf")
         self.btn_open.grid(row=0, column=0, padx=8)
 
         self.btn_clear = tk.Button(top, text="2. 清空Performance Log", command=self.clear_perf_log, width=20, bg="#333", fg="#ff0")
@@ -663,46 +779,40 @@ class GUI:
 
         self.status = tk.Label(
             root,
-            text="等待操作：先启动浏览器，再手工登录并打开目标页面。",
+            text="等待操作：先启动国网浏览器，再手工登录并打开目标页面。",
             fg="#0f6",
             bg="#1c1c1c",
             font=("Consolas", 11, "bold"),
-            wraplength=860,
+            wraplength=920,
             justify="left",
         )
         self.status.pack(pady=8)
 
         self.text = scrolledtext.ScrolledText(
-            root, height=30, width=120, bg="#000", fg="#0f6", font=("Consolas", 9)
+            root, height=32, width=130, bg="#000", fg="#0f6", font=("Consolas", 9)
         )
         self.text.pack(pady=10)
 
         self.root.after(100, self.process_queue)
 
     def set_busy(self, busy=True):
-        state = "disabled" if busy else "normal"
-        self.btn_open.config(state=state if not busy else "disabled")
-        self.btn_clear.config(state=state if not busy else "disabled")
-        self.btn_start.config(state=state if not busy else "disabled")
-        self.btn_stop.config(state="normal" if busy else "disabled")
+        if busy:
+            self.btn_open.config(state="disabled")
+            self.btn_clear.config(state="disabled")
+            self.btn_start.config(state="disabled")
+            self.btn_stop.config(state="normal")
+        else:
+            self.btn_open.config(state="normal")
+            self.btn_clear.config(state="normal")
+            self.btn_start.config(state="normal")
+            self.btn_stop.config(state="disabled")
 
     def open_browser(self):
         try:
-            if not os.path.exists(CHROME_BINARY_PATH):
-                raise FileNotFoundError(f"未找到便携版 Chrome: {CHROME_BINARY_PATH}")
-            if not os.path.exists(CHROMEDRIVER_PATH):
-                raise FileNotFoundError(f"未找到 chromedriver.exe: {CHROMEDRIVER_PATH}")
-
-            options = Options()
-            options.binary_location = CHROME_BINARY_PATH
-            options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-
-            service = Service(executable_path=CHROMEDRIVER_PATH)
-            self.collector.driver = webdriver.Chrome(service=service, options=options)
-            self.collector.driver.execute_cdp_cmd("Network.enable", {})
-
-            self.status.config(text="浏览器已启动。请手工登录并打开目标列表页面。")
-            self.text.insert(tk.END, "✅ 浏览器已启动，请手工登录并打开目标列表页面。\n")
+            self.status.config(text="正在启动/连接国网浏览器 9222 端口 ...")
+            self.collector.connect_sg_browser()
+            self.status.config(text="国网浏览器已连接。请手工登录并打开目标列表页面。")
+            self.text.insert(tk.END, "✅ 国网浏览器已启动/连接，请手工登录并打开目标列表页面。\n")
             self.text.see(tk.END)
 
         except Exception as e:
@@ -710,7 +820,7 @@ class GUI:
 
     def clear_perf_log(self):
         if not self.collector.driver:
-            messagebox.showwarning("提示", "请先启动浏览器。")
+            messagebox.showwarning("提示", "请先启动国网浏览器。")
             return
 
         try:
@@ -724,7 +834,7 @@ class GUI:
 
     def start_collect(self):
         if not self.collector.driver:
-            messagebox.showwarning("提示", "请先启动浏览器。")
+            messagebox.showwarning("提示", "请先启动国网浏览器。")
             return
 
         if self.collector.collecting:
@@ -765,7 +875,6 @@ class GUI:
         except queue.Empty:
             pass
 
-        # 如果 worker 已经结束，恢复按钮
         if self.worker and not self.worker.is_alive():
             self.set_busy(False)
             self.collector.collecting = False
